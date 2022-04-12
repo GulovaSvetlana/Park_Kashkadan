@@ -1,0 +1,131 @@
+library(tidyverse)
+library(sf)
+sf::sf_use_s2(FALSE)
+library(osmdata)
+library(ggmap)
+library(leaflet)
+library(RColorBrewer)
+
+park_sf = read_sf('F:/New Project/park_kashkadan.geojson')
+plot(park_sf)
+
+overpass_url = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+
+bbox = st_bbox(park_sf$geometry) %>%
+matrix(ncol=2,nrow=2) 
+
+colnames(bbox) = c("min","max")
+rownames(bbox) = c("x","y")
+
+park_kashkadan_all = bbox %>% 
+  opq(timeout = 900) %>%
+  add_osm_feature(
+    key = "natural",
+    value = available_tags("natural")) %>% osmdata_sf()
+
+ggplot()
+  geom_sf(data =
+            park_kashkadan_all$osm_polygons, aes())
+  geom_sf(data = park_kashkadan_all$osm_polygons, aes(fill = "natural"))
+  theme_bw()
+
+map_polygons = st_read ("F:/New Project/map.osm", layer = "multipolygons", quiet = TRUE)
+map_lines = st_read ("F:/New Project/map.osm", layer = "lines", quiet = TRUE)
+			 map_polygons = map_polygons %>% filter(!is.na(natural) | !is.na(building))
+			 
+map_lines = map_lines %>% 
+	      filter(highway == "footway")
+map_polygons = st_intersection (map_polygons, park_sf)
+map_lines = st_intersection (map_lines, park_sf)
+
+map_polygons$geometry = map_polygons$geometry %>% s2::s2_rebuild() %>%sf::st_as_sfc()
+map_lines$geometry = map_lines$geometry %>% s2::s2_rebuild() %>% sf::st_as_sfc()
+map_polygons = map_polygons %>% st_collection_extract(type="POLYGON")
+map_polygons$natural[!is.na(map_polygons$building)] = "yards"
+map_polygons$natural = as.factor(map_polygons$natural)
+levels(map_polygons$natural) = c("Пляж","Водные объекты","Древесные насаждения", "Строения")
+map_lines$highway = as.factor(map_lines$highway)
+levels(map_lines$highway) = c("асфальт")
+
+ggplot()+
+geom_sf(map_polygons,
+map=aes(fill=natural))+
+geom_sf(map_lines,
+map=aes(color=highway))+
+theme_bw()
+
+
+leaflet() %>% addProviderTiles("OpenTopoMap") %>%
+addPolygons(data = park_sf$geometry %>% s2::s2_rebuild() %>%
+sf::st_as_sfc(),  color = "black") %>%
+addPolygons(data = map_polygons, fillColor = "grey", color = "grey") %>% addPolylines(data = map_lines,
+color = "red")
+
+
+ggmap(mad_map)+
+geom_sf(data = map_polygons,
+map=aes(fill=natural), inherit.aes = FALSE )+
+geom_sf(data = map_lines,
+map=aes(color=highway), inherit.aes = FALSE)+
+xlab("Широта, °")+
+ylab("Долгота, °")+
+guides(fill = guide_legend(title="Легенда"),
+color =guide_legend(title = "Дороги") )+
+theme_bw()+ 
+theme(legend.position = "bottom")+
+scale_fill_brewer(palette="Set3")
+
+area = st_area(park_sf)
+wood_area = sum(st_area(map_polygons %>% filter(natural=="Древесные насаждения")))
+water_area = st_area(map_polygons %>% filter(natural=="Водные объекты"))
+building_area = sum(st_area(map_polygons %>% filter(!is.na(building))))
+footway_length = st_length(map_lines)
+footway_area = sum(footway_length*2)
+
+
+summary_ha = tibble (
+  water = round (as.numeric(water_area)/10000, 2),
+  wood = round (as.double(wood_area)/10000, 2),
+  build = round (as.double(building_area)/10000, 2),
+  road = round (as.double(footway_area)/10000, 2),
+  grass = round (as.numeric(area)/10000, 2) - water - wood - build -road,
+  area = round (as.numeric(area)/10000, 2),
+  name = "Площадь, га")
+
+summary_perc = summary_ha %>% mutate(
+  water = water / area * 100,
+  wood = wood/ area * 100,
+  build = build / area * 100,
+  road = road / area * 100,
+  grass = grass/area * 100,
+  area =  100,
+  name = "Доля, %"
+)
+summary_final = summary_ha %>% mutate(
+  area = (build+road)/(area-water)*100,
+  water = NA,
+  wood = NA,
+  build = NA,
+  road = NA,
+  grass = NA,
+  name = "Итого запечатано %"
+)
+
+
+summary_table = rbind(summary_ha,summary_perc, summary_final) 
+summary_table = summary_table %>% select(name,water,road,wood,build,grass,area)
+
+library (gt)
+sum_tabl = summary_table %>% gt (rowname_col = "name") %>% tab_header(
+  title = "Сводная таблица типов ландшафта парка «Кашкадан»",
+  subtitle = "Площади, доли и степень запечатанности"
+  ) %>% cols_label(
+  water = "Водные объекты",
+  area = "Итого",
+  road = "Дорожное покрытие",
+  wood  = "Древесные насаждения",
+  build = "Строения",
+  grass = "Газон"
+  ) %>%  fmt_number (columns = everything()) %>%
+  fmt_missing (columns = everything())
+
